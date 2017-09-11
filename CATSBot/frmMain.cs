@@ -1,41 +1,47 @@
 ﻿using MetroFramework;
 using System;
-using System.Diagnostics;
-using System.Linq;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
+using System.IO;
+using System.Drawing;
 
 using CATSBot.Helper;
+using System.Net;
 
 namespace CATSBot
 {
-    public partial class frmMain : MetroFramework.Forms.MetroForm
+    public partial class frmMain : MetroFramework.Forms.MetroForm 
     {
         Thread thread;
         bool isRunning = false;
+
 
         public frmMain()
         {
             InitializeComponent();
             BotHelper.main = this;
             Settings.getInstance().loadSettings(this);
+
+#if DEBUG
+            this.Text = "CATSBot - DEBUG";
+#endif
         }
 
         private void btnStart_Click(object sender, EventArgs e)
         {
-            if (!BotHelper.setMemuIntPtr())
+            if(Settings.getInstance().adbPath == "")
             {
-                MetroFramework.MetroMessageBox.Show(this, "MEmu is not running!");
+                MetroFramework.MetroMessageBox.Show(this, "Please set your MEmu installation directory before starting the bot.");
                 return;
             }
 
             if (!isRunning)
             {
-                if (chkUseSidebar.Checked)
-                    ClickOnPointTool.ResizeWindow(BotHelper.memu, 1328, 758);
-                else
-                    ClickOnPointTool.ResizeWindow(BotHelper.memu, 1288, 758);
+                if (!BotHelper.isMemuRunning())
+                {
+                    MetroFramework.MetroMessageBox.Show(this, "MEmu is not running!");
+                    return;
+                }
 
                 btnStart.Text = "Stop";
                 isRunning = true;
@@ -58,12 +64,34 @@ namespace CATSBot
 
         public void doLoop()
         {
-            BotHelper.Log("(Re-)Starting main loop.");
+            int fails = 0;
+            do
+            {
+                Thread.Sleep(1500);
+                BotHelper.Log("(Re-)Starting main loop.");
 
-            if (chkAutoReconnect.Checked)
-                BotLogics.ReconnectLogic.doLogic();
+                if (!BotLogics.AttackLogic.doLogic())
+                {
+                    BotLogics.ClearScreenLogic.doLogic();
+                    fails++;
+                }
+                else fails = 0;
 
-            BotLogics.AttackLogic.doLogic();
+                if (chkAutoReconnect.Checked)
+                    BotLogics.ReconnectLogic.doLogic();
+
+                if (chkUseChestLogic.Checked)
+                    BotLogics.ChestLogic.doLogic(); // uncomment this line to test the chest opener. Please report any false-positives.
+
+
+            } while (fails < 5);
+            
+            BotHelper.Log("Too many errors. Restarting CATS.");
+            ADBHelper.stopCATS();
+            BotHelper.randomDelay(1000, 5);
+            ADBHelper.startCATS();
+            BotHelper.Log("Waiting for CATS to restart. Waiting 30s.");
+            Thread.Sleep(30000);
 
             doLoop();
         }
@@ -71,11 +99,11 @@ namespace CATSBot
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
             if(thread != null && thread.IsAlive)
-                thread.Suspend(); // TODO: Proper Multithreading
+                thread.Suspend(); // TODO: Proper Multithreading       
 
+            //Save and exit
             Settings.getInstance().saveSettings();
-
-            Application.Exit();
+            Application.Exit(); 
         }
 
         private void btnSaveDebug_Click(object sender, EventArgs e)
@@ -99,32 +127,36 @@ namespace CATSBot
                 this.Theme = MetroThemeStyle.Light;
                 metroStyle.Theme = MetroThemeStyle.Light;
 
-                txtLog.BackColor = System.Drawing.Color.White;
-                txtLog.ForeColor = System.Drawing.Color.Black;
-
                 foreach (TabPage tp in tabMain.Controls)
                 {
+                    foreach (Control ctrl in tp.Controls)
+                    {
+                        if (ctrl is NumericUpDown || ctrl is TextBox)
+                        {
+                            ctrl.BackColor = System.Drawing.Color.White;
+                            ctrl.ForeColor = System.Drawing.Color.Black;
+                        }
+                    }
                     tp.BackColor = System.Drawing.Color.White;
                 }
-
-                nudReconnectTime.BackColor = System.Drawing.Color.White;
-                nudReconnectTime.ForeColor = System.Drawing.Color.Black;
             }
             else if (theme == MetroThemeStyle.Dark)
             {
                 this.Theme = MetroThemeStyle.Dark;
                 metroStyle.Theme = MetroThemeStyle.Dark;
 
-                txtLog.BackColor = System.Drawing.ColorTranslator.FromHtml("#111111");
-                txtLog.ForeColor = System.Drawing.Color.White;
-
                 foreach (TabPage tp in tabMain.Controls)
                 {
+                    foreach(Control ctrl in tp.Controls)
+                    {
+                        if(ctrl is NumericUpDown || ctrl is TextBox)
+                        {
+                            ctrl.BackColor = System.Drawing.ColorTranslator.FromHtml("#111111");
+                            ctrl.ForeColor = System.Drawing.Color.White;
+                        }
+                    }
                     tp.BackColor = System.Drawing.ColorTranslator.FromHtml("#111111");
                 }
-
-                nudReconnectTime.BackColor = System.Drawing.ColorTranslator.FromHtml("#111111");
-                nudReconnectTime.ForeColor = System.Drawing.Color.White;
             }
         }
 
@@ -146,11 +178,6 @@ namespace CATSBot
 
         #region Setting-saving "dummys"
         //These are just for setting-saving purposes
-        private void chkUseSidebar_CheckedChanged(object sender, EventArgs e)
-        {
-            Settings.getInstance().memuSidebarEnabled = chkUseSidebar.Checked;
-        }
-
         private void chkAutoReconnect_CheckedChanged(object sender, EventArgs e)
         {
             Settings.getInstance().automaticReconnectEnabled = chkAutoReconnect.Checked;
@@ -160,6 +187,129 @@ namespace CATSBot
         {
             Settings.getInstance().reconnectTime = Convert.ToInt32(nudReconnectTime.Value);
         }
+        
+        private void chkAlwaysTop_CheckedChanged(object sender, EventArgs e)
+        {
+            Settings.getInstance().topmost = chkAlwaysTop.Checked;
+            this.TopMost = Settings.getInstance().topmost;
+        }
+
+        private void frmMain_ResizeEnd(object sender, EventArgs e)
+        {
+            Settings.getInstance().frmSize = this.Size;
+        }
+
+        private void frmMain_LocationChanged(object sender, EventArgs e)
+        {
+            if (this.Location.Y > 0)
+            {
+                Settings.getInstance().frmLoc = this.Location;
+            }
+        }
+        private void chkUseChestLogic_CheckedChanged(object sender, EventArgs e)
+        {
+            Settings.getInstance().useChestLogic = chkUseChestLogic.Checked;
+        }
+
+        private void chkAutoUpdate_CheckedChanged(object sender, EventArgs e)
+        {
+            Settings.getInstance().enableAutoUpdater = chkAutoUpdate.Checked;
+        }
         #endregion
+
+        private void btnResetStats_Click(object sender, EventArgs e)
+        {
+            BotLogics.AttackLogic.resetStats();
+        }
+
+        private void btnChangeMemuPath_Click(object sender, EventArgs e)
+        {
+            BotHelper.pickMemuDir();
+        }
+
+        private void frmMain_Shown(object sender, EventArgs e)
+        {
+            if (Settings.getInstance().adbPath == "")
+            {
+                // Check default installation path
+                if (File.Exists(@"C:\Program Files\Microvirt\MEmu\adb.exe"))
+                {
+                    Settings.getInstance().adbPath = @"C:\Program Files\Microvirt\MEmu\adb.exe";
+                }
+                else if (File.Exists(@"D:\Program Files\Microvirt\MEmu\adb.exe"))
+                {
+                    Settings.getInstance().adbPath = @"D:\Program Files\Microvirt\MEmu\adb.exe";
+                }
+                else
+                {
+                    BotHelper.pickMemuDir();
+                }
+
+                txtCurrentMemuPath.Text = Settings.getInstance().adbPath;
+            }
+
+            if(Settings.getInstance().enableAutoUpdater) checkUpdates(); 
+        }
+
+        private bool checkUpdates()
+        {
+            if (!File.Exists("CATSBot-Updater.exe"))
+            {
+                btnCheckUpdates.Visible = false;
+                btnCheckUpdates.Enabled = false;
+                return false;
+            }
+                
+
+            double thisVersion = 0;
+            if (!File.Exists("version"))
+            {
+                // file doesn't exist, update.
+                DialogResult dr = MetroMessageBox.Show(this, "There's a new update available. Do you want to download it now?", "Update available", MessageBoxButtons.YesNo);
+                if (dr == DialogResult.Yes)
+                {
+                    System.Diagnostics.Process.Start("CATSBot-Updater.exe");
+                    Application.Exit();
+                }
+
+                return true; 
+            }
+
+            thisVersion = Convert.ToDouble(File.ReadAllText("version"));
+            WebClient wc = new WebClient();
+
+            double currentVersion = Convert.ToDouble(wc.DownloadString("https://catsbot.net/releases/version"));
+
+            if(currentVersion > thisVersion)
+            {
+                DialogResult dr = MetroMessageBox.Show(this, "There's a new update available. Do you want to download it now?", "Update available", MessageBoxButtons.YesNo);
+                if(dr == DialogResult.Yes)
+                {
+                    System.Diagnostics.Process.Start("CATSBot-Updater.exe");
+                    Application.Exit();
+                }
+
+                return true;
+            }
+            else
+            {
+                return false;
+            }
+
+
+        }
+
+        private void btnCheckUpdates_Click(object sender, EventArgs e)
+        {
+            if(!checkUpdates())
+            {
+                DialogResult dr = MetroMessageBox.Show(this, "You're already using the latest version of CATSBot. :)", "No update available");
+            }
+        }
+
+        private void numericUpDown1_ValueChanged(object sender, EventArgs e)
+        {
+            BotLogics.AttackLogic.maxHealth = (int)numericUpDown1.Value;
+        }
     }
 }
